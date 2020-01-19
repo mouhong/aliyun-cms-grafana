@@ -1,6 +1,7 @@
 import _ from "lodash";
 import {Util} from './util.js';
 import {CmsSigner} from "./signer.js";
+import Describer from "./describer";
 
 export class GenericDatasource {
   constructor(instanceSettings, $q, backendSrv, templateSrv) {
@@ -105,64 +106,96 @@ export class GenericDatasource {
           headers: this.headers
         }).then(response => {
           if(response.status == '200' && response.data.Code == '200'){
-            var resResult = [];
-            var dataDatapoints = angular.fromJson(response.data.Datapoints);
-            //处理数据分类
-            var target_datapoints = [];
-            if(dimensions.includes("instanceId")){
-              for(var i in dataDatapoints){
-                if (!target_datapoints[dataDatapoints[i].instanceId]) {
-                  var arr = [];
-                  arr.push(dataDatapoints[i]);
-                  target_datapoints[dataDatapoints[i].instanceId] = arr;
-                }else{
-                  target_datapoints[dataDatapoints[i].instanceId].push(dataDatapoints[i]);
-                }
-              }
-            }
-            // 处理Grafana所需的target值、Target组的所需返回结果集
-            ycol.map(ycolTarget => {
-              if(dimensions.includes("instanceId")){
-                for(var i in target_datapoints){
-                  var datapoints = [];
-                  target_datapoints[i].forEach(Datapoint=>{
-                    var datapoint = [];
-                    datapoint.push(Datapoint[ycolTarget], Datapoint[xcol]);
-                    // 封装返回目标的第二层数组值
-                    datapoints.push(datapoint);
-                  })
-                  // 封装返回目标的第三层数组值
-                  resResult.push({
-                    "target": describe + i + "." + ycolTarget,
-                    "datapoints": datapoints
-                  });
-                };
-              }else{
-                var datapoints = [];
-                dataDatapoints.forEach(Datapoint=>{
-                  var datapoint = [];
-                  datapoint.push(Datapoint[ycolTarget], Datapoint[xcol]);
-                  // 封装返回目标的第二层数组值
-                  datapoints.push(datapoint);
-                })
-                // 封装返回目标的第三层数组值
-                resResult.push({
-                  "target": describe + ycolTarget,
-                  "datapoints": datapoints
-                });
-              }
-            });
-            // 转对象封装
-            result = result.concat(typeof resResult == 'string' ? JSON.parse(resResult) : resResult);
+            return this._transformQueryResponse(response, xcol, ycol, dimensions, describe).then(res => {
+              result = result.concat(typeof res == 'string' ? JSON.parse(res) : res);
+            })
           }
         }).catch(function (error) {
           console.log(error);
         });
         requests.push(request);
       })
+
     // 统一单独处理返回值
     return Promise.all(requests.map(p => p.catch(e => e))).then(() => { return {data: result}; });
   } 
+
+  async _transformQueryResponse(response, xcol, ycol, dimensions, describe) {
+    let resResult = [];
+    let dataDatapoints = angular.fromJson(response.data.Datapoints);
+    //处理数据分类
+    let target_datapoints = [];
+    let instanceDescs = []
+
+    if (dimensions.includes("instanceId")) {
+      let instanceIds = _.uniq(_.map(dataDatapoints, 'instanceId'))
+      let describer = new Describer({
+        proxy: this.backendSrv,
+        credentials: {
+          access_key: atob(this.jsonData.cmsAccessKey),
+          secret_key: atob(this.jsonData.cmsSecretKey)
+        }
+      })
+
+      try {
+        instanceDescs = await describer.describe(instanceIds)
+      } catch (e) {
+        console.error('Failed loading instance descriptions')
+      }
+
+      for (var i in dataDatapoints) {
+        if (!target_datapoints[dataDatapoints[i].instanceId]) {
+          var arr = [];
+          arr.push(dataDatapoints[i]);
+          target_datapoints[dataDatapoints[i].instanceId] = arr;
+        } else {
+          target_datapoints[dataDatapoints[i].instanceId].push(dataDatapoints[i]);
+        }
+      }
+    }
+
+    // 处理Grafana所需的target值、Target组的所需返回结果集
+    ycol.map(ycolTarget => {
+      if (dimensions.includes("instanceId")) {
+        let dims = JSON.parse(decodeURIComponent(dimensions).replace(/;/g, ','))
+        for (let dim of dims) {
+          let target = null
+          if (instanceDescs[dim.instanceId]) {
+            target = instanceDescs[dim.instanceId].description
+          } else {
+            target = describe
+            if (target) {
+              target = target.replace(/\.$/, '')
+            } else {
+              target = dim.instanceId
+            }
+          }
+
+          resResult.push({
+            target: target,
+            datapoints: target_datapoints[dim.instanceId].map(p => {
+              return [ p[ycolTarget], p[xcol] ]
+            })
+          })
+        }
+      } else {
+        var datapoints = [];
+        dataDatapoints.forEach(point => {
+          var datapoint = [];
+          datapoint.push(point[ycolTarget], point[xcol]);
+          // 封装返回目标的第二层数组值
+          datapoints.push(datapoint);
+        })
+        // 封装返回目标的第三层数组值
+        resResult.push({
+          "target": describe + ycolTarget,
+          "datapoints": datapoints
+        });
+      }
+    });
+
+    return resResult
+  }
 
   // 测试连接数据源接口
   testDatasource() {
